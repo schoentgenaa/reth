@@ -2,7 +2,9 @@
 
 use alloc::{sync::Arc, vec::Vec};
 use alloy_eips::{
-    eip4844::BlobTransactionSidecar, eip4895::Withdrawals, eip7594::BlobTransactionSidecarEip7594,
+    eip4844::BlobTransactionSidecar,
+    eip4895::Withdrawals,
+    eip7594::{BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant},
     eip7685::Requests,
 };
 use alloy_primitives::{Address, B256, U256};
@@ -243,6 +245,45 @@ impl BlobSidecars {
     pub const fn eip7594(sidecars: Vec<BlobTransactionSidecarEip7594>) -> Self {
         Self::Eip7594(sidecars)
     }
+
+    /// Push EIP-4844 blob sidecar. Ignores the item if sidecars already contain EIP-7594 sidecars.
+    pub fn push_eip4844_sidecar(&mut self, sidecar: BlobTransactionSidecar) {
+        match self {
+            Self::Empty => {
+                *self = Self::Eip4844(Vec::from([sidecar]));
+            }
+            Self::Eip4844(sidecars) => {
+                sidecars.push(sidecar);
+            }
+            Self::Eip7594(_) => {}
+        }
+    }
+
+    /// Push EIP-7594 blob sidecar. Ignores the item if sidecars already contain EIP-4844 sidecars.
+    pub fn push_eip7594_sidecar(&mut self, sidecar: BlobTransactionSidecarEip7594) {
+        match self {
+            Self::Empty => {
+                *self = Self::Eip7594(Vec::from([sidecar]));
+            }
+            Self::Eip7594(sidecars) => {
+                sidecars.push(sidecar);
+            }
+            Self::Eip4844(_) => {}
+        }
+    }
+
+    /// Push a [`BlobTransactionSidecarVariant`]. Ignores the item if sidecars already contain the
+    /// opposite type.
+    pub fn push_sidecar_variant(&mut self, sidecar: BlobTransactionSidecarVariant) {
+        match sidecar {
+            BlobTransactionSidecarVariant::Eip4844(sidecar) => {
+                self.push_eip4844_sidecar(sidecar);
+            }
+            BlobTransactionSidecarVariant::Eip7594(sidecar) => {
+                self.push_eip7594_sidecar(sidecar);
+            }
+        }
+    }
 }
 
 impl From<Vec<BlobTransactionSidecar>> for BlobSidecars {
@@ -363,7 +404,7 @@ impl PayloadBuilderAttributes for EthPayloadBuilderAttributes {
 /// Generates the payload id for the configured payload from the [`PayloadAttributes`].
 ///
 /// Returns an 8-byte identifier by hashing the payload components with sha256 hash.
-pub(crate) fn payload_id(parent: &B256, attributes: &PayloadAttributes) -> PayloadId {
+pub fn payload_id(parent: &B256, attributes: &PayloadAttributes) -> PayloadId {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     hasher.update(parent.as_slice());

@@ -2,15 +2,15 @@
 
 use crate::{
     AccountReader, BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader,
-    BlockReader, BlockReaderIdExt, BlockSource, ChangeSetReader, HashedPostStateProvider,
-    HeaderProvider, NodePrimitivesProvider, OmmersProvider, PruneCheckpointReader, ReceiptProvider,
-    ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider, StateProvider,
-    StateProviderBox, StateProviderFactory, StateRootProvider, StorageRootProvider,
-    TransactionVariant, TransactionsProvider, WithdrawalsProvider,
+    BlockReader, BlockReaderIdExt, BlockSource, BytecodeReader, ChangeSetReader,
+    HashedPostStateProvider, HeaderProvider, NodePrimitivesProvider, PruneCheckpointReader,
+    ReceiptProvider, ReceiptProviderIdExt, StageCheckpointReader, StateProofProvider,
+    StateProvider, StateProviderBox, StateProviderFactory, StateRootProvider, StorageRootProvider,
+    TransactionVariant, TransactionsProvider,
 };
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use alloy_consensus::transaction::TransactionMeta;
-use alloy_eips::{eip4895::Withdrawals, BlockHashOrNumber, BlockId, BlockNumberOrTag};
+use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumberOrTag};
 use alloy_primitives::{
     Address, BlockHash, BlockNumber, Bytes, StorageKey, StorageValue, TxHash, TxNumber, B256, U256,
 };
@@ -22,9 +22,7 @@ use core::{
 use reth_chainspec::{ChainInfo, ChainSpecProvider, EthChainSpec, MAINNET};
 use reth_db_models::{AccountBeforeTx, StoredBlockBodyIndices};
 use reth_ethereum_primitives::EthPrimitives;
-use reth_primitives_traits::{
-    Account, Bytecode, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
-};
+use reth_primitives_traits::{Account, Bytecode, NodePrimitives, RecoveredBlock, SealedHeader};
 use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_storage_errors::provider::{ProviderError, ProviderResult};
@@ -146,10 +144,6 @@ impl<C: Send + Sync, N: NodePrimitives> BlockReaderIdExt for NoopProvider<C, N> 
     fn header_by_id(&self, _id: BlockId) -> ProviderResult<Option<N::BlockHeader>> {
         Ok(None)
     }
-
-    fn ommers_by_id(&self, _id: BlockId) -> ProviderResult<Option<Vec<N::BlockHeader>>> {
-        Ok(None)
-    }
 }
 
 impl<C: Send + Sync, N: NodePrimitives> BlockReader for NoopProvider<C, N> {
@@ -167,17 +161,13 @@ impl<C: Send + Sync, N: NodePrimitives> BlockReader for NoopProvider<C, N> {
         Ok(None)
     }
 
-    fn pending_block(&self) -> ProviderResult<Option<SealedBlock<Self::Block>>> {
-        Ok(None)
-    }
-
-    fn pending_block_with_senders(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
         Ok(None)
     }
 
     fn pending_block_and_receipts(
         &self,
-    ) -> ProviderResult<Option<(SealedBlock<Self::Block>, Vec<Self::Receipt>)>> {
+    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
         Ok(None)
     }
 
@@ -304,6 +294,13 @@ impl<C: Send + Sync, N: NodePrimitives> ReceiptProvider for NoopProvider<C, N> {
         &self,
         _range: impl RangeBounds<TxNumber>,
     ) -> ProviderResult<Vec<Self::Receipt>> {
+        Ok(Vec::new())
+    }
+
+    fn receipts_by_block_range(
+        &self,
+        _block_range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
         Ok(Vec::new())
     }
 }
@@ -456,7 +453,9 @@ impl<C: Send + Sync, N: NodePrimitives> StateProvider for NoopProvider<C, N> {
     ) -> ProviderResult<Option<StorageValue>> {
         Ok(None)
     }
+}
 
+impl<C: Send + Sync, N: NodePrimitives> BytecodeReader for NoopProvider<C, N> {
     fn bytecode_by_hash(&self, _code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
         Ok(None)
     }
@@ -487,7 +486,9 @@ impl<C: Send + Sync + 'static, N: NodePrimitives> StateProviderFactory for NoopP
 
                 self.history_by_block_hash(hash)
             }
-            BlockNumberOrTag::Earliest => self.history_by_block_number(0),
+            BlockNumberOrTag::Earliest => {
+                self.history_by_block_number(self.earliest_block_number()?)
+            }
             BlockNumberOrTag::Pending => self.pending(),
             BlockNumberOrTag::Number(num) => self.history_by_block_number(num),
         }
@@ -525,22 +526,6 @@ impl<C: Send + Sync, N: NodePrimitives> StageCheckpointReader for NoopProvider<C
 
     fn get_all_checkpoints(&self) -> ProviderResult<Vec<(String, StageCheckpoint)>> {
         Ok(Vec::new())
-    }
-}
-
-impl<C: Send + Sync, N: NodePrimitives> WithdrawalsProvider for NoopProvider<C, N> {
-    fn withdrawals_by_block(
-        &self,
-        _id: BlockHashOrNumber,
-        _timestamp: u64,
-    ) -> ProviderResult<Option<Withdrawals>> {
-        Ok(None)
-    }
-}
-
-impl<C: Send + Sync, N: NodePrimitives> OmmersProvider for NoopProvider<C, N> {
-    fn ommers(&self, _id: BlockHashOrNumber) -> ProviderResult<Option<Vec<Self::Header>>> {
-        Ok(None)
     }
 }
 

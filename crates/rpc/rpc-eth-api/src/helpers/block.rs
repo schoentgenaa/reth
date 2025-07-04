@@ -10,12 +10,11 @@ use alloy_primitives::{Sealable, U256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{Block, BlockTransactions, Header, Index};
 use futures::Future;
+use reth_evm::ConfigureEvm;
 use reth_node_api::BlockBody;
-use reth_primitives_traits::{RecoveredBlock, SealedBlock};
-use reth_provider::{
-    BlockIdReader, BlockReader, BlockReaderIdExt, ProviderHeader, ProviderReceipt, ProviderTx,
-};
-use reth_rpc_types_compat::block::from_block;
+use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
+use reth_rpc_convert::RpcConvert;
+use reth_storage_api::{BlockIdReader, BlockReader, ProviderHeader, ProviderReceipt, ProviderTx};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use std::sync::Arc;
 
@@ -24,7 +23,7 @@ pub type BlockReceiptsResult<N, E> = Result<Option<Vec<RpcReceipt<N>>>, E>;
 /// Result type of the fetched block and its receipts.
 pub type BlockAndReceiptsResult<Eth> = Result<
     Option<(
-        SealedBlock<<<Eth as RpcNodeCore>::Provider as BlockReader>::Block>,
+        Arc<RecoveredBlock<<<Eth as RpcNodeCore>::Provider as BlockReader>::Block>>,
         Arc<Vec<ProviderReceipt<<Eth as RpcNodeCore>::Provider>>>,
     )>,
     <Eth as EthApiTypes>::Error,
@@ -60,7 +59,9 @@ pub trait EthBlocks: LoadBlock {
         async move {
             let Some(block) = self.recovered_block(block_id).await? else { return Ok(None) };
 
-            let block = from_block((*block).clone(), full.into(), self.tx_resp_builder())?;
+            let block = block.clone_into_rpc_block(full.into(), |tx, tx_info| {
+                self.tx_resp_builder().fill(tx, tx_info)
+            })?;
             Ok(Some(block))
         }
     }
@@ -79,7 +80,7 @@ pub trait EthBlocks: LoadBlock {
                     .provider()
                     .pending_block()
                     .map_err(Self::Error::from_eth_err)?
-                    .map(|block| block.body().transactions().len()))
+                    .map(|block| block.body().transaction_count()));
             }
 
             let block_hash = match self
@@ -129,24 +130,26 @@ pub trait EthBlocks: LoadBlock {
                     .pending_block_and_receipts()
                     .map_err(Self::Error::from_eth_err)?
                 {
-                    return Ok(Some((block, Arc::new(receipts))));
+                    return Ok(Some((Arc::new(block), Arc::new(receipts))));
                 }
 
                 // If no pending block from provider, build the pending block locally.
                 if let Some((block, receipts)) = self.local_pending_block().await? {
-                    return Ok(Some((block.into_sealed_block(), Arc::new(receipts))));
+                    return Ok(Some((Arc::new(block), Arc::new(receipts))));
                 }
             }
 
             if let Some(block_hash) =
                 self.provider().block_hash_for_id(block_id).map_err(Self::Error::from_eth_err)?
             {
-                return self
+                if let Some((block, receipts)) = self
                     .cache()
                     .get_block_and_receipts(block_hash)
                     .await
-                    .map_err(Self::Error::from_eth_err)
-                    .map(|b| b.map(|(b, r)| (b.clone_sealed_block(), r)))
+                    .map_err(Self::Error::from_eth_err)?
+                {
+                    return Ok(Some((block, receipts)));
+                }
             }
 
             Ok(None)
@@ -160,8 +163,15 @@ pub trait EthBlocks: LoadBlock {
     fn ommers(
         &self,
         block_id: BlockId,
-    ) -> Result<Option<Vec<ProviderHeader<Self::Provider>>>, Self::Error> {
-        self.provider().ommers_by_id(block_id).map_err(Self::Error::from_eth_err)
+    ) -> impl Future<Output = Result<Option<Vec<ProviderHeader<Self::Provider>>>, Self::Error>> + Send
+    {
+        async move {
+            if let Some(block) = self.recovered_block(block_id).await? {
+                Ok(block.body().ommers().map(|o| o.to_vec()))
+            } else {
+                Ok(None)
+            }
+        }
     }
 
     /// Returns uncle block at given index in given block.
@@ -181,7 +191,9 @@ pub trait EthBlocks: LoadBlock {
                     .map_err(Self::Error::from_eth_err)?
                     .and_then(|block| block.body().ommers().map(|o| o.to_vec()))
             } else {
-                self.provider().ommers_by_id(block_id).map_err(Self::Error::from_eth_err)?
+                self.recovered_block(block_id)
+                    .await?
+                    .map(|block| block.body().ommers().map(|o| o.to_vec()).unwrap_or_default())
             }
             .unwrap_or_default();
 
@@ -207,6 +219,8 @@ pub trait LoadBlock:
     + SpawnBlocking
     + RpcNodeCoreExt<
         Pool: TransactionPool<Transaction: PoolTransaction<Consensus = ProviderTx<Self::Provider>>>,
+        Primitives: NodePrimitives<SignedTx = ProviderTx<Self::Provider>>,
+        Evm: ConfigureEvm<Primitives = <Self as RpcNodeCore>::Primitives>,
     >
 {
     /// Returns the block object for the given block id.
@@ -223,10 +237,8 @@ pub trait LoadBlock:
         async move {
             if block_id.is_pending() {
                 // Pending block can be fetched directly without need for caching
-                if let Some(pending_block) = self
-                    .provider()
-                    .pending_block_with_senders()
-                    .map_err(Self::Error::from_eth_err)?
+                if let Some(pending_block) =
+                    self.provider().pending_block().map_err(Self::Error::from_eth_err)?
                 {
                     return Ok(Some(Arc::new(pending_block)));
                 }
